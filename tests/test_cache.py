@@ -3,7 +3,9 @@ import shutil
 import sys
 import textwrap
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import cache
 
@@ -300,6 +302,58 @@ class CacheMemoizeTests(unittest.TestCase):
         sys.modules.pop("consumer_testmod", None)
         mod = _load_module(consumer_source, consumer_path, self.cache_dir)
         self.assertEqual(mod.run(), 14)
+        self.assertEqual(mod.CALLS, 1)
+
+    def test_miss_when_entry_expires(self) -> None:
+        module_path = self.cache_dir / "ttl.py"
+        mod = _load_module(
+            """
+            import cache
+
+            CALLS = 0
+
+            @cache.memoize(cache_dir={cache_dir})
+            def compute(x):
+                global CALLS
+                CALLS += 1
+                return x
+            """,
+            module_path,
+            self.cache_dir,
+        )
+
+        mod.compute(1)
+        self.assertEqual(mod.CALLS, 1)
+
+        expired_now = datetime.now(timezone.utc) + cache.DEFAULT_TTL + timedelta(seconds=1)
+        with patch("cache._utcnow", return_value=expired_now):
+            mod.compute(1)
+        self.assertEqual(mod.CALLS, 2)
+
+    def test_hit_when_entry_within_ttl(self) -> None:
+        module_path = self.cache_dir / "ttl_hit.py"
+        mod = _load_module(
+            """
+            import cache
+
+            CALLS = 0
+
+            @cache.memoize(cache_dir={cache_dir})
+            def compute(x):
+                global CALLS
+                CALLS += 1
+                return x
+            """,
+            module_path,
+            self.cache_dir,
+        )
+
+        mod.compute(1)
+        self.assertEqual(mod.CALLS, 1)
+
+        still_valid = datetime.now(timezone.utc) + cache.DEFAULT_TTL - timedelta(seconds=1)
+        with patch("cache._utcnow", return_value=still_valid):
+            mod.compute(1)
         self.assertEqual(mod.CALLS, 1)
 
     def test_hit_when_import_outside_script_folder_changes(self) -> None:

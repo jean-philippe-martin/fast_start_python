@@ -1,4 +1,19 @@
-"""Disk-backed memoization with AST-based dependency tracking."""
+"""Disk-backed memoization with AST-based dependency tracking.
+
+Basic usage: just add @cache.memoize above the function you want to cache.
+
+@cache.memoize
+def fetch_sales(region: str) -> dict:
+    pass # todo: fetch from database
+
+Now the result of fetch_sales will be cached on disk, and subsequent calls will return the cached result.
+Cache invalidation is triggered by:
+- different arguments
+- changes to the function's source code
+- changes to same-file functions the function calls
+- changes to same-folder modules imported before the function is called
+- entries older than 30 minutes
+"""
 
 from __future__ import annotations
 
@@ -10,7 +25,7 @@ import json
 import os
 import pickle
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, TypeVar
@@ -18,6 +33,7 @@ from typing import Any, Callable, TypeVar
 F = TypeVar("F", bound=Callable[..., Any])
 
 DEFAULT_CACHE_DIR = Path(".fspython_cache")
+DEFAULT_TTL = timedelta(minutes=30)
 _CACHE_DIR_OVERRIDE: Path | None = None
 
 
@@ -371,7 +387,7 @@ def _ensure_version(root: Path, func_key: str, meta_path: Path, version_hash: st
             {
                 "qualified_name": func_key,
                 "version_hash": version_hash,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": _utcnow().isoformat(),
             },
         )
     finally:
@@ -388,6 +404,20 @@ def _write_meta(meta_path: Path, payload: dict[str, Any]) -> None:
     _atomic_write(meta_path, json.dumps(payload, indent=2).encode("utf-8"))
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+def _entry_expired(created_at: str | None, ttl: timedelta = DEFAULT_TTL) -> bool:
+    if not created_at:
+        return True
+    return _utcnow() - _parse_timestamp(created_at) >= ttl
+
+
 def _load_entry(entry_path: Path, version_hash: str, args_hash: str) -> Any | None:
     if not entry_path.exists():
         return None
@@ -397,6 +427,9 @@ def _load_entry(entry_path: Path, version_hash: str, args_hash: str) -> Any | No
 
     if payload.get("version_hash") != version_hash or payload.get("args_hash") != args_hash:
         return None
+    if _entry_expired(payload.get("created_at")):
+        entry_path.unlink(missing_ok=True)
+        return None
     return payload.get("value")
 
 
@@ -405,7 +438,7 @@ def _save_entry(entry_path: Path, value: Any, version_hash: str, args_hash: str)
         "value": value,
         "version_hash": version_hash,
         "args_hash": args_hash,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": _utcnow().isoformat(),
     }
     try:
         data = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)

@@ -11,18 +11,30 @@ The cache must **miss** (recompute) when:
 
 1. **Call arguments change** — different inputs → different cache entry
 2. **The decorated function’s source code changes** — any edit to that function invalidates all of its cached entries
+3. **Same-file helpers change** — functions the decorated function calls, defined in the same `.py` file (detected via AST)
+4. **Same-folder imports change** — `.py` modules already loaded in `sys.modules` from the same directory as the script (content hash at call time)
 
 This is intentionally narrower than a general-purpose cache: it optimizes the “iterating on a script around a slow core function” workflow common in data analysis.
 
+See [`how_to_use_cache.md`](how_to_use_cache.md) for user-facing documentation of the current behavior.
+
 ---
 
-## Non-goals (v1)
+## Non-goals
 
 - Distributed / shared cache across machines
-- Cache invalidation when *dependencies* change (e.g. a helper function the decorated function calls)
 - TTL-based expiry (can be added later)
 - Caching async functions
 - Security sandboxing of pickled cache files from untrusted sources
+
+## Dependency tracking limits (implemented, but scoped)
+
+These are **not** non-goals — partial dependency tracking is implemented — but the scope is deliberately limited:
+
+- Helpers in **other files** are tracked only if the module is imported into `sys.modules` from the **same folder** as the script before the decorated function runs
+- Imports from **other directories** (even on `sys.path`) are not tracked
+- **Transitive** dependencies (helpers of helpers in other files) are not followed
+- **Dynamic** imports and calls (`importlib.import_module(name)`, `getattr(x, name)()`) are not detected
 
 ---
 
@@ -92,23 +104,29 @@ Hash the canonical byte representation with **SHA-256** (hex string for filename
 
 Include the function’s **qualified name** and **defining module** in the key prefix so two functions with identical args never collide.
 
-### 2. Source code → function version
+### 2. Source code → version hash
 
-On each call (before lookup):
+On each call (before lookup), build a **version hash** from:
 
-1. Obtain source via `inspect.getsource(func)`
-2. Normalize minimally (strip trailing whitespace on each line) to avoid trivial edit noise
-3. Hash → `source_hash`
+1. The decorated function’s source (from the file AST)
+2. Same-file **callees** referenced in the decorated function’s AST
+3. Content hashes of **same-folder** modules present in `sys.modules`
 
-Compare against `source_hash` stored in that function’s metadata file. If it differs:
+If the version hash differs from the value stored in metadata:
 
 - delete all cache entry files for that function
-- update metadata with the new `source_hash`
+- update metadata with the new hash
 - proceed as a cache miss
 
-This satisfies “invalidate if the source code of **the function itself** has changed” without requiring manual cache clears during development.
+#### Same-file callees (AST)
 
-**Note:** changes to *other* functions the decorated function calls do **not** invalidate the cache. Document this explicitly.
+Parse the decorated function body and collect direct calls (`helper()`, `self.method()`). Hash the source of matching functions defined in the same file.
+
+#### Same-folder imports (`sys.modules`)
+
+At call time, scan loaded modules whose `__file__` is a `.py` in the script’s directory (excluding `site-packages`). Hash each file’s contents. The module must already be imported before the decorated function runs.
+
+**Note:** changes to helpers in **other folders** do not invalidate the cache unless you also change tracked code or clear the cache manually.
 
 ---
 
@@ -130,7 +148,7 @@ This satisfies “invalidate if the source code of **the function itself** has c
   "qualified_name": "myscript.fetch_users",
   "module": "myscript",
   "function_name": "fetch_users",
-  "source_hash": "sha256:...",
+  "version_hash": "sha256:...",
   "updated_at": "2026-05-30T12:00:00Z"
 }
 ```
@@ -143,7 +161,7 @@ Pickle payload:
 {
   "value": <return value>,
   "created_at": "...",
-  "source_hash": "...",   # redundant check at load time
+  "version_hash": "...",   # redundant check at load time
   "args_hash": "...",
 }
 ```
@@ -161,12 +179,12 @@ call wrapped(*args, **kwargs)
   │
   ├─ if not enabled → call func directly
   │
-  ├─ compute source_hash; load function metadata
-  │     └─ if source_hash changed → purge function entries, update meta
+  ├─ compute version_hash; load function metadata
+  │     └─ if version_hash changed → purge function entries, update meta
   │
   ├─ compute args_hash
   │
-  ├─ if entry file exists and entry.source_hash == source_hash
+  ├─ if entry file exists and entry.version_hash == version_hash
   │     └─ unpickle → return value
   │
   └─ else
@@ -223,39 +241,32 @@ Document this behavior clearly — cache keys for `__main__` functions are tied 
 | Mutable args mutated after call | Caller responsibility; args hashed at call time |
 | Very large return values | No size limit in v1; document disk usage |
 | User deletes `.fspython_cache/` manually | Safe; cache rebuilds on next hit |
+| Import from other folder | Not tracked even if on `sys.path` |
+| Import not yet loaded before call | Not in `sys.modules` yet → not tracked |
+| Dynamic import / call | Not detected |
 | Script renamed | New cache namespace (different file stem); old entries orphaned |
 
 ---
 
-## Implementation steps
+## Implementation status
 
-### Phase 1 — Core (MVP)
+### Done
 
-1. Create `cache.py` with:
-   - `_source_hash(func) -> str`
-   - `_args_hash(func_key, args, kwargs) -> str`
-   - `_function_key(func) -> str` (handle `__main__` via `co_filename`)
-   - `_get_cache_paths(...)` 
-   - `@memoize` decorator with disk read/write
-   - source-change purge logic
-2. Add `.fspython_cache/` to `.gitignore`
-3. Unit tests in `tests/test_cache.py`:
-   - cache hit / miss on identical args
-   - miss after arg change
-   - miss after source edit
-   - atomic write / reload across fresh `importlib` reload simulating rerun
-
-### Phase 2 — Examples and integration
-
-1. Add `examples/cache_db_query.py` — fake slow function (sleep + random) demonstrating speedup on second run
-2. Mention in README under a short “Caching” section
-
-### Phase 3 — Polish (optional)
-
-- `cache.clear()` / `cache.clear_function(fn)`
+- `cache.py` with `@cache.memoize`, disk storage, args hashing, version hashing
+- Same-file callee tracking (AST)
+- Same-folder import tracking (`sys.modules`)
+- `cache.clear()` / `cache.clear_function()`
 - `enabled=False` flag
+- `.fspython_cache/` in `.gitignore`
+- Unit tests in `tests/test_cache.py` (including dependency cases)
+- `examples/cache_slow_query.py`
+- [`how_to_use_cache.md`](how_to_use_cache.md)
+
+### Optional follow-ups
+
 - TTL
-- logging at DEBUG for hit/miss/invalidate events
+- DEBUG logging for hit/miss/invalidate
+- `@memoize(ignore_self=True)` for methods
 
 ---
 
@@ -294,7 +305,7 @@ if __name__ == "__main__":
     main()
 ```
 
-After editing only `main()`, `fetch_sales` cache remains valid. After editing the body of `fetch_sales`, next call recomputes.
+After editing only `main()`, `fetch_sales` cache remains valid. After editing the body of `fetch_sales`, or `run_query` in the same file, or a same-folder module imported before the call, next run recomputes.
 
 ---
 
@@ -311,9 +322,11 @@ Recommendation for v1: project-local `.fspython_cache/`, pickle for values, JSON
 
 ## Success criteria
 
-- [ ] Second identical call returns without re-executing function body
-- [ ] Changing any decorated function source invalidates its cache
-- [ ] Changing args selects a different entry (or misses)
-- [ ] Cache persists after process exit and `fspython run` rerun
-- [ ] Works with at least `dict`, `list`, `str`, `int`, and `pandas.DataFrame` return values
-- [ ] Clear errors for unsupported cases (no source, unserializable args)
+- [x] Second identical call returns without re-executing function body
+- [x] Changing any decorated function source invalidates its cache
+- [x] Changing args selects a different entry (or misses)
+- [x] Cache persists after process exit and `fspython run` rerun
+- [x] Same-file helper changes invalidate the cache
+- [x] Same-folder import changes invalidate the cache (when loaded before call)
+- [x] Works with at least `dict`, `list`, `str`, `int` return values
+- [x] Clear errors for unsupported cases (no source, unserializable args)
