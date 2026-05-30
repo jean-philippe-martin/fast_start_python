@@ -21,21 +21,95 @@ Data analysis libraries it imports:
 - openpyxl
 - requests
 
-Command line:
+## Command line
 
-// start the listener process
+Start the listener process:
+
+```
 uv run fspython.py serve
+```
 
-// connect to the server, run somefile.py
+Connect to the server and run a script:
+
+```
 uv run fspython.py run somefile.py
+```
 
-Helpers:
+Pass arguments to the script (use `--` before script args if needed):
 
-This will start a fspython process, redirect the output to /tmp/fspython.log, background it.
+```
+uv run fspython.py run somefile.py -- --foo bar
+```
 
+Server and client options (`--host`, `--port`) go **before** the script path:
+
+```
+uv run fspython.py run --port 9876 somefile.py
+```
+
+## Matplotlib and plotting
+
+The server preloads matplotlib with the **Agg** backend — a non-interactive renderer that draws in memory and is safe to use after `fork()`. This is ideal for the fast path: saving figures with `savefig()`, benchmarks, and scripts that don't open windows.
+
+Interactive plots (`plt.show()`) need a GUI backend and **cannot** run on the fork fast path. For those, use **GUI mode**:
+
+1. Start the server with GUI mode allowed (disabled by default):
+
+```
+uv run fspython.py serve --allow-gui
+```
+
+2. Run the script with `--gui` (spawns a fresh Python process attached to your terminal):
+
+```
+uv run fspython.py run --gui examples/show_plot.py
+```
+
+If you try `--gui` against a server started without `--allow-gui`, the run is rejected with an error.
+
+GUI mode skips the preloaded-import fast path (matplotlib loads cold), but windows work reliably.
+
+Matplotlib does not export interactive HTML; use Plotly for that (see examples below).
+
+## Examples
+
+All of these work on the fast path unless noted. Generated files go to `examples/output/`.
+
+| Script | What it does |
+|--------|----------------|
+| `examples/pyplot_save_png.py` | matplotlib line plot → PNG |
+| `examples/plotly_save_png.py` | Plotly scatter → PNG |
+| `examples/plotly_save_html.py` | Plotly line chart → interactive HTML |
+| `examples/compute_pandas.py` | groupby / pivot, prints tables |
+| `examples/compute_regression.py` | OLS regression, prints coefficients |
+| `examples/show_plot.py` | live plot window (`run --gui`, server needs `--allow-gui`) |
+
+```
+uv run fspython.py run examples/pyplot_save_png.py
+uv run fspython.py run examples/plotly_save_html.py
+open examples/output/plotly_interactive.html
+```
+
+## Helpers
+
+Start a fspython process in the background, with output redirected to `/tmp/fspython.log`:
+
+```
 ./start-fspython.sh
+```
 
-This will kill the fspython process
+Stop the fspython process:
 
+```
 ./stop-fspython.sh
+```
 
+To allow plotting via the helpers, add `--allow-gui` to the `serve` command in `start-fspython.sh`.
+
+## Benchmark
+
+Compare cold-start Python vs fspython for a data-science script:
+
+```
+uv run python bench_startup.py --runs 3
+```

@@ -24,5 +24,4 @@ _ = openpyxl.__version__
 _ = requests.__version__
 _ = plotly.__version__
 _ = sns.__version__
-pyplot.figure()
-pyplot.close()
+print("Hello world from sample_ds.py")

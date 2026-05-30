@@ -72,7 +72,16 @@ def main() -> int:
     )
     try:
         wait_for_port(args.host, args.port)
-        fspython_cmd = [sys.executable, str(ROOT / "fspython.py"), "run", str(script), "--host", args.host, "--port", str(args.port)]
+        fspython_cmd = [
+            sys.executable,
+            str(ROOT / "fspython.py"),
+            "run",
+            "--host",
+            args.host,
+            "--port",
+            str(args.port),
+            str(script),
+        ]
         fspython_samples = [time_command(fspython_cmd, ROOT) for _ in range(args.runs)]
     finally:
         server.terminate()
