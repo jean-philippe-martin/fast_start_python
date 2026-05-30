@@ -82,12 +82,15 @@ All of these work on the fast path unless noted. Generated files go to `examples
 | `examples/plotly_save_html.py` | Plotly line chart → interactive HTML |
 | `examples/compute_pandas.py` | groupby / pivot, prints tables |
 | `examples/compute_regression.py` | OLS regression, prints coefficients |
+| `examples/cache_slow_query.py` | disk cache demo with helper invalidation |
 | `examples/show_plot.py` | live plot window (`run --gui`, server needs `--allow-gui`) |
 
+## Caching
+
+Scripts can import `cache` and decorate expensive functions with `@cache.memoize`. Results are stored in `.fspython_cache/` and invalidated when call arguments change or when the decorated function **or its same-module callees** (detected via AST) change source code.
+
 ```
-uv run fspython.py run examples/pyplot_save_png.py
-uv run fspython.py run examples/plotly_save_html.py
-open examples/output/plotly_interactive.html
+uv run fspython.py run examples/cache_slow_query.py
 ```
 
 ## Helpers

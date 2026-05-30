@@ -11,3 +11,10 @@ wheels/
 
 # Example script output
 examples/output/
+
+# Disk cache
+.fspython_cache/
+
+# Test artifacts
+tests/tmp/
+test_*_cache/

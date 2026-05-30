@@ -238,6 +238,9 @@ def run_script(script_path: Path, cwd: Path, args: list[str]) -> tuple[str, str,
     with CaptureFds() as capture:
         sys.argv = [str(script_path), *args]
         os.chdir(cwd)
+        cwd_str = str(cwd.resolve())
+        if cwd_str not in sys.path:
+            sys.path.insert(0, cwd_str)
         try:
             runpy.run_path(str(script_path), run_name="__main__")
         except SystemExit as exc:
