@@ -11,13 +11,18 @@ def compute(x):
     return x * 2
 
 
-def main():
-    return compute(3)
-
-
 def new_helper():
     return "added later"
 
 
 def report():
     return {"compute": compute(3), "extra": new_helper()}
+
+
+def main():
+    print(f"result={compute(3)} calls={CALLS}")
+    print(f"extra={new_helper()}")
+
+
+if __name__ == "__main__":
+    main()

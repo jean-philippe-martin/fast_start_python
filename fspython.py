@@ -40,6 +40,7 @@ def env_port() -> int:
 
 def preload_imports() -> None:
     """Import data-science libraries once in the parent before forking."""
+    # This will prevent pyplot from opening a window when running in GUI mode.
     os.environ.setdefault("MPLBACKEND", "Agg")
     import matplotlib.pyplot  # noqa: F401
     import numpy  # noqa: F401
@@ -111,8 +112,8 @@ def send_json_line(conn: socket.socket, payload: dict[str, Any]) -> None:
     conn.sendall(json.dumps(payload, ensure_ascii=False).encode() + b"\n")
 
 
-def parse_request(data: dict[str, Any]) -> tuple[Path, Path, list[str], bool]:
-    """Validate a run request and return script path, cwd, args, and gui flag."""
+def parse_request(data: dict[str, Any]) -> tuple[Path, Path, list[str], bool, dict[str, str]]:
+    """Validate a run request and return script path, cwd, args, gui flag, and env."""
     script = data.get("script")
     if not script or not isinstance(script, str):
         raise ValueError("Missing or invalid 'script' in request")
@@ -131,7 +132,16 @@ def parse_request(data: dict[str, Any]) -> tuple[Path, Path, list[str], bool]:
         raise ValueError("'args' must be a list of strings")
 
     gui = bool(data.get("gui", False))
-    return script_path, cwd, args, gui
+
+    raw_env = data.get("env", {})
+    if raw_env is None:
+        raw_env = {}
+    if not isinstance(raw_env, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in raw_env.items()
+    ):
+        raise ValueError("'env' must be a dict of string keys and values")
+
+    return script_path, cwd, args, gui, raw_env
 
 
 def attach_to_tty() -> None:
@@ -154,15 +164,18 @@ def build_response(
     message: str = "",
     stdout: str = "",
     stderr: str = "",
+    **extra: Any,
 ) -> dict[str, Any]:
     """Build a standard JSON response payload."""
-    return {
+    payload = {
         "ok": ok,
         "code": code,
         "message": message,
         "stdout": stdout,
         "stderr": stderr,
     }
+    payload.update(extra)
+    return payload
 
 
 def _read_pipe(read_fd: int, limit: int = MAX_CAPTURE_BYTES) -> str:
@@ -234,10 +247,18 @@ class CaptureFds:
         return self._stderr
 
 
-def run_script(script_path: Path, cwd: Path, args: list[str]) -> tuple[str, str, int]:
+def run_script(
+    script_path: Path,
+    cwd: Path,
+    args: list[str],
+    extra_env: dict[str, str] | None = None,
+) -> tuple[str, str, int]:
     """Change to cwd, set sys.argv, execute script_path, and capture output."""
     if not script_path.is_file():
         raise FileNotFoundError(f"Script not found: {script_path}")
+
+    if extra_env:
+        os.environ.update(extra_env)
 
     code = 0
     with CaptureFds() as capture:
@@ -282,7 +303,7 @@ def handle_client(conn: socket.socket, request: dict[str, Any] | None = None) ->
     try:
         if request is None:
             request = read_json_line(conn, max_size=MAX_REQUEST_BYTES)
-        script_path, cwd, args, gui = parse_request(request)
+        script_path, cwd, args, gui, extra_env = parse_request(request)
         if gui and not _allow_gui:
             raise PermissionError(
                 "GUI mode is disabled on this server. "
@@ -291,7 +312,7 @@ def handle_client(conn: socket.socket, request: dict[str, Any] | None = None) ->
         if gui:
             stdout, stderr, code = run_script_gui(script_path, cwd, args)
         else:
-            stdout, stderr, code = run_script(script_path, cwd, args)
+            stdout, stderr, code = run_script(script_path, cwd, args, extra_env=extra_env)
         ok = code == 0
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 1
@@ -314,13 +335,36 @@ def begin_drain(listen_sock: socket.socket) -> None:
 
     _drain_requested = True
     print("draining...", file=sys.stderr, flush=True)
-    listen_sock.close()
 
 
 def handle_drain_request(conn: socket.socket, listen_sock: socket.socket) -> None:
     """Acknowledge a drain request and enter drain mode."""
     begin_drain(listen_sock)
     send_json_line(conn, build_response(ok=True, code=0, message="draining"))
+    conn.close()
+
+
+def server_state() -> str:
+    """Return a short label for the current server lifecycle state."""
+    if _shutdown_requested:
+        return "shutting_down"
+    if _drain_requested:
+        return "draining"
+    return "ready"
+
+
+def handle_status_request(conn: socket.socket) -> None:
+    """Return server state without forking."""
+    send_json_line(
+        conn,
+        build_response(
+            ok=True,
+            code=0,
+            state=server_state(),
+            active_children=len(_active_children),
+            gui=_allow_gui,
+        ),
+    )
     conn.close()
 
 
@@ -352,21 +396,16 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
         gui_status = "enabled" if allow_gui else "disabled"
         print(f"fspython ready on {host}:{port} (gui {gui_status})", file=sys.stderr, flush=True)
 
-        listening = True
-
         while not _shutdown_requested:
-            if _drain_requested:
-                if not _active_children:
-                    break
-                time.sleep(0.1)
-                continue
+            if _drain_requested and not _active_children:
+                break
 
             try:
                 conn, _addr = listen_sock.accept()
             except (TimeoutError, socket.timeout):
                 continue
             except OSError as exc:
-                if _shutdown_requested or _drain_requested or not listening:
+                if _shutdown_requested or _drain_requested:
                     break
                 raise exc
 
@@ -379,7 +418,10 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
             command = request.get("command")
             if command == "drain":
                 handle_drain_request(conn, listen_sock)
-                listening = False
+                continue
+
+            if command == "status":
+                handle_status_request(conn)
                 continue
 
             if _drain_requested:
@@ -398,8 +440,7 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
 
             pid = os.fork()
             if pid == 0:
-                if listening:
-                    listen_sock.close()
+                listen_sock.close()
                 handle_client(conn, request)
             elif pid < 0:
                 reject_request(conn, f"fork failed: {os.strerror(errno.errno)}")
@@ -431,13 +472,16 @@ def write_captured_output(stdout: str, stderr: str) -> None:
         sys.stderr.flush()
 
 
+def send_command(host: str, port: int, request: dict[str, Any], timeout: float = 30) -> dict[str, Any]:
+    """Send a control request to the server and return the JSON response."""
+    with socket.create_connection((host, port), timeout=timeout) as conn:
+        send_json_line(conn, request)
+        return read_json_line(conn)
+
+
 def drain_server(host: str, port: int) -> int:
     """Ask a running server to drain and stop accepting new runs."""
-    request = {"command": "drain"}
-
-    with socket.create_connection((host, port), timeout=30) as conn:
-        send_json_line(conn, request)
-        response = read_json_line(conn)
+    response = send_command(host, port, {"command": "drain"})
 
     message = response.get("message", "")
     if message:
@@ -451,19 +495,53 @@ def drain_server(host: str, port: int) -> int:
     return 0
 
 
+def status_server(host: str, port: int) -> int:
+    """Print the running server's state."""
+    response = send_command(host, port, {"command": "status"})
+
+    if not response.get("ok"):
+        message = response.get("message", "")
+        if message:
+            print(message, file=sys.stderr)
+        else:
+            print(f"Unexpected response from server: {response!r}", file=sys.stderr)
+        return 1
+
+    state = response.get("state", "unknown")
+    active_children = int(response.get("active_children", 0))
+    gui = "enabled" if response.get("gui") else "disabled"
+    print(f"{state} ({active_children} active children, gui {gui})", file=sys.stderr)
+    return 0
+
+
+def client_env_for_run() -> dict[str, str]:
+    """Return client environment variables that should apply to the script child."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key.startswith("FSPYTHON_")
+    }
+
+
 def run_script_via_server(
     script: str,
     host: str,
     port: int,
     script_args: list[str],
     gui: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> int:
     """Connect to the server, request a script run, and return its exit code."""
+    env = client_env_for_run()
+    if extra_env:
+        env.update(extra_env)
+
     request = {
         "script": str(Path(script).expanduser().resolve()),
         "cwd": str(Path.cwd().resolve()),
         "args": script_args,
         "gui": gui,
+        "env": env,
     }
 
     with socket.create_connection((host, port), timeout=None if gui else 30) as conn:
@@ -524,11 +602,23 @@ def build_parser() -> argparse.ArgumentParser:
     drain_parser.add_argument("--host", default=env_host(), help=f"Server host (default: {DEFAULT_HOST})")
     drain_parser.add_argument("--port", type=int, default=env_port(), help=f"Server port (default: {DEFAULT_PORT})")
 
+    status_parser = subparsers.add_parser("status", help="Show state of a running server")
+    status_parser.add_argument("--host", default=env_host(), help=f"Server host (default: {DEFAULT_HOST})")
+    status_parser.add_argument("--port", type=int, default=env_port(), help=f"Server port (default: {DEFAULT_PORT})")
+
     return parser
 
 
+def _connection_error(host: str, port: int) -> None:
+    print(
+        f"Could not connect to fspython at {host}:{port}. "
+        "Start the server with: uv run fspython.py serve",
+        file=sys.stderr,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Parse CLI arguments and dispatch to serve, run, or drain."""
+    """Parse CLI arguments and dispatch to serve, run, drain, or status."""
     args = build_parser().parse_args(argv)
 
     if args.command == "serve":
@@ -539,11 +629,14 @@ def main(argv: list[str] | None = None) -> int:
         try:
             return drain_server(args.host, args.port)
         except ConnectionRefusedError:
-            print(
-                f"Could not connect to fspython at {args.host}:{args.port}. "
-                "Start the server with: uv run fspython.py serve",
-                file=sys.stderr,
-            )
+            _connection_error(args.host, args.port)
+            return 1
+
+    if args.command == "status":
+        try:
+            return status_server(args.host, args.port)
+        except ConnectionRefusedError:
+            _connection_error(args.host, args.port)
             return 1
 
     if args.command == "run":
@@ -556,11 +649,7 @@ def main(argv: list[str] | None = None) -> int:
                 gui=args.gui,
             )
         except ConnectionRefusedError:
-            print(
-                f"Could not connect to fspython at {args.host}:{args.port}. "
-                "Start the server with: uv run fspython.py serve",
-                file=sys.stderr,
-            )
+            _connection_error(args.host, args.port)
             return 1
 
     return 1

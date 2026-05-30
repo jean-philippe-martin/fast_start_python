@@ -1,4 +1,3 @@
-"""Initial script: memoized compute only."""
 import cache
 
 CALLS = 0
@@ -11,9 +10,5 @@ def compute(x):
     return x * 2
 
 
-def main():
-    print(f"result={compute(3)} calls={CALLS}")
-
-
 if __name__ == "__main__":
-    main()
+    print(f"result={compute(3)} calls={CALLS}")

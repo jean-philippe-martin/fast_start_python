@@ -1,4 +1,3 @@
-import importlib.util
 import os
 import shutil
 import sys
@@ -7,74 +6,7 @@ from pathlib import Path
 
 import cache
 
-TESTS_DIR = Path(__file__).resolve().parent
-FIXTURES_DIR = TESTS_DIR / "cache_fixtures"
-SCRIPT_NAME = "script.py"
-MODULE_NAME = "script_testmod"
-
-
-def _clear_pycache(directory: Path) -> None:
-    for pycache in directory.rglob("__pycache__"):
-        shutil.rmtree(pycache)
-
-
-class ScriptSequenceHarness:
-    """Copy fixture versions onto one script path and reload like a rerun."""
-
-    def __init__(self, work_dir: Path, cache_dir: Path) -> None:
-        self.work_dir = work_dir
-        self.cache_dir = cache_dir
-        self.script_path = work_dir / SCRIPT_NAME
-        self.work_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    def install_script(self, fixture_path: Path) -> None:
-        """Copy a fixture file onto the fixed script path."""
-        shutil.copy(fixture_path, self.script_path)
-        _clear_pycache(self.work_dir)
-        importlib.invalidate_caches()
-
-    def install_dependency(self, name: str, fixture_path: Path) -> None:
-        """Copy a same-folder dependency module into the workspace."""
-        shutil.copy(fixture_path, self.work_dir / f"{name}.py")
-        _clear_pycache(self.work_dir)
-        importlib.invalidate_caches()
-        sys.modules.pop(name, None)
-
-    def reload(self):
-        """Load script.py fresh, as if the process reran after an edit."""
-        work_dir = str(self.work_dir.resolve())
-        if work_dir not in sys.path:
-            sys.path.insert(0, work_dir)
-
-        os.environ["FSPYTHON_CACHE_DIR"] = str(self.cache_dir.resolve())
-        sys.modules.pop(MODULE_NAME, None)
-
-        spec = importlib.util.spec_from_file_location(MODULE_NAME, self.script_path)
-        assert spec and spec.loader
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[MODULE_NAME] = module
-        spec.loader.exec_module(module)
-        return module
-
-    def prepare(
-        self,
-        *,
-        script: Path | None = None,
-        deps: dict[str, Path] | None = None,
-    ):
-        """Install script and dependency fixtures, then reload."""
-        if script is not None:
-            self.install_script(script)
-        if deps:
-            for name, fixture_path in deps.items():
-                self.install_dependency(name, fixture_path)
-        return self.reload()
-
-    def run_version(self, fixture_path: Path):
-        """Install a script fixture version and reload."""
-        self.install_script(fixture_path)
-        return self.reload()
+from harness import FIXTURES_DIR, MODULE_NAME, TESTS_DIR, ScriptSequenceHarness
 
 
 class CacheSequenceTests(unittest.TestCase):

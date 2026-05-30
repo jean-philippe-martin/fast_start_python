@@ -1,4 +1,3 @@
-import importlib.util
 import shutil
 import sys
 import textwrap
@@ -9,27 +8,9 @@ from unittest.mock import patch
 
 import cache
 
-TESTS_DIR = Path(__file__).resolve().parent
+from harness import TESTS_DIR, load_module_from_source
 
-
-def _load_module(source: str, path: Path, cache_dir: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = textwrap.dedent(source).format(cache_dir=repr(str(cache_dir)))
-    path.write_text(rendered, encoding="utf-8")
-    for pycache in path.parent.rglob("__pycache__"):
-        shutil.rmtree(pycache)
-    importlib.invalidate_caches()
-    work_dir = str(path.parent.resolve())
-    if work_dir not in sys.path:
-        sys.path.insert(0, work_dir)
-    name = path.stem + "_testmod"
-    sys.modules.pop(name, None)
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+_load_module = load_module_from_source
 
 
 class CacheMemoizeTests(unittest.TestCase):

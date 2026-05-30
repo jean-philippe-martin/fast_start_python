@@ -51,6 +51,7 @@ The cache is keyed by **function identity**, **arguments**, and a **code version
 | Decorated function | Its source in the script file |
 | Same-file helpers | Functions **called** by the decorated function, defined in the same `.py` file (AST) |
 | Same-folder imports | `.py` files already loaded in `sys.modules` from the **same directory as the script** |
+| Age | Entries older than **30 minutes** |
 
 If any of these change, cached results for that function are discarded on the next call.
 
@@ -90,7 +91,7 @@ At call time, `cache` scans `sys.modules` and hashes the contents of any loaded 
 Important details:
 
 - The module must be **imported before** the decorated function runs (so it appears in `sys.modules` when the cache is checked).
-- It does not matter *where* in your code the import appears — top of file, inside `main()`, etc.
+- A module imported **after** the decorated function returns is not tracked and will not invalidate the cache.
 - Only files in the **same folder** as the script count. A sibling directory on `sys.path` is **not** tracked.
 - Third-party packages in `site-packages` are never tracked.
 
@@ -128,9 +129,14 @@ def fetch_sales(region: str) -> dict:
 
 - Editing a `.py` file in a **different folder** from the script (even if imported and on `sys.path`)
 - Editing a same-folder module that has **not yet been imported** before the decorated function runs
+- Editing a same-folder module that is imported **after** the decorated function returns
 - Changing unrelated functions in the same file that the decorated function never calls
 - Changing data files, environment variables, or database contents
 - Upgrading a third-party library (unless you also change your own tracked code)
+
+### 5. Time to live
+
+Each cache entry expires after **30 minutes**. After that, the next call with the same arguments runs the function body again even if nothing else changed.
 
 If external data can go stale, clear the cache manually (below) or change an argument (e.g. pass a date or schema version).
 
@@ -152,7 +158,7 @@ def fetch_users(limit: int):
     ...
 ```
 
-Or set an environment variable before running:
+Or set an environment variable before running (with fspython, `FSPYTHON_*` variables are forwarded to the script process):
 
 ```bash
 export FSPYTHON_CACHE_DIR=/tmp/my_project_cache
@@ -219,7 +225,9 @@ rm -rf .fspython_cache
 
 **Same-folder imports only.** Import tracking uses `sys.modules` at call time and only includes `.py` files in the script’s directory. Imports from parent packages, sibling folders, or `site-packages` are ignored.
 
-**Import timing.** A same-folder module is tracked only after it has been imported at least once in the current process before the decorated function runs.
+**Import timing.** A same-folder module is tracked only after it has been imported at least once in the current process **before** the decorated function runs.
+
+**fspython fast path.** Scripts run via `fspython run` can `import cache` normally. Run from a directory where `cache.py` is on `sys.path` (typically the project root). See the README for server commands (`status`, `drain`).
 
 **Trust your cache files.** Cached entries are stored as pickle files. Do not load cache files from untrusted sources.
 

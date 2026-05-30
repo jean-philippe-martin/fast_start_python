@@ -87,11 +87,49 @@ All of these work on the fast path unless noted. Generated files go to `examples
 
 ## Caching
 
-Scripts can import `cache` and decorate expensive functions with `@cache.memoize`. Results are stored in `.fspython_cache/` and invalidated when call arguments change or when the decorated function **or its same-module callees** (detected via AST) change source code.
+Scripts can import `cache` and decorate expensive functions with `@cache.memoize`. Results are stored on disk (default: `.fspython_cache/`) and survive between `fspython run` invocations.
+
+On the **fast path** (normal `run`, not `--gui`), your script runs in a forked child with the preloaded imports already warm. A plain `import cache` in your script is all you need — no special server setup.
+
+Cache entries are invalidated when:
+
+- call arguments change
+- the decorated function’s source changes
+- same-file functions **called by** the decorated function change
+- same-folder `.py` modules already imported before the call change
+- an entry is older than **30 minutes**
+
+Run from the **project root** (or any directory where `cache.py` is importable via `cwd` on `sys.path`):
 
 ```
 uv run fspython.py run examples/cache_slow_query.py
+uv run fspython.py run examples/cache_slow_query.py   # cache hit
 ```
+
+To use a custom cache directory, set `FSPYTHON_CACHE_DIR` in the environment before `fspython run` (it is forwarded to the script process):
+
+```
+export FSPYTHON_CACHE_DIR=/tmp/my_cache
+uv run fspython.py run examples/cache_slow_query.py
+```
+
+See `docs/how_to_use_cache.md` for full details.
+
+## Server control
+
+Check whether the server is running:
+
+```
+uv run fspython.py status
+```
+
+Gracefully stop accepting new runs and exit once in-flight scripts finish:
+
+```
+uv run fspython.py drain
+```
+
+While draining, `run` requests are rejected; `status` still works. When all active children complete, the server exits.
 
 ## Helpers
 
@@ -101,13 +139,33 @@ Start a fspython process in the background, with output redirected to `/tmp/fspy
 ./start-fspython.sh
 ```
 
-Stop the fspython process:
+Stop the fspython process (immediate SIGTERM):
 
 ```
 ./stop-fspython.sh
 ```
 
+For a graceful shutdown that waits for in-flight runs, use drain instead:
+
+```
+uv run fspython.py drain
+```
+
 To allow plotting via the helpers, add `--allow-gui` to the `serve` command in `start-fspython.sh`.
+
+## Tests
+
+Run the test suite:
+
+```
+./run-tests.sh
+```
+
+Skip the slow fspython drain tests (~7s instead of ~17s):
+
+```
+./run-tests.sh --fast-only
+```
 
 ## Benchmark
 

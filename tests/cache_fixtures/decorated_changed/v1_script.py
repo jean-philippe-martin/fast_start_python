@@ -11,4 +11,8 @@ def compute(x):
 
 
 def main():
-    return compute(3)
+    print(f"result={compute(3)} calls={CALLS}")
+
+
+if __name__ == "__main__":
+    main()
