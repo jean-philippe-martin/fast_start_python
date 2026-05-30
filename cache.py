@@ -7,6 +7,7 @@ def fetch_sales(region: str) -> dict:
     pass # todo: fetch from database
 
 Now the result of fetch_sales will be cached on disk, and subsequent calls will return the cached result.
+
 Cache invalidation is triggered by:
 - different arguments
 - changes to the function's source code
