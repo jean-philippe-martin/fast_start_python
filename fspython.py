@@ -12,6 +12,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,9 @@ MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_CAPTURE_BYTES = 10 * 1024 * 1024
 
 _shutdown_requested = False
+_drain_requested = False
 _allow_gui = False
+_active_children: set[int] = set()
 
 
 def env_host() -> str:
@@ -64,6 +67,8 @@ def install_sigchld_handler() -> None:
                 break
             if pid == 0:
                 break
+            if pid > 0:
+                _active_children.discard(pid)
 
     signal.signal(signal.SIGCHLD, reap_children)
 
@@ -266,7 +271,7 @@ def run_script_gui(script_path: Path, cwd: Path, args: list[str]) -> tuple[str, 
     return "", "", completed.returncode
 
 
-def handle_client(conn: socket.socket) -> None:
+def handle_client(conn: socket.socket, request: dict[str, Any] | None = None) -> None:
     """Run the requested script in a forked child and send the result back."""
     stdout = ""
     stderr = ""
@@ -275,7 +280,8 @@ def handle_client(conn: socket.socket) -> None:
     ok = False
 
     try:
-        request = read_json_line(conn, max_size=MAX_REQUEST_BYTES)
+        if request is None:
+            request = read_json_line(conn, max_size=MAX_REQUEST_BYTES)
         script_path, cwd, args, gui = parse_request(request)
         if gui and not _allow_gui:
             raise PermissionError(
@@ -297,6 +303,31 @@ def handle_client(conn: socket.socket) -> None:
 
     send_json_line(conn, build_response(ok=ok, code=code, message=message, stdout=stdout, stderr=stderr))
     os._exit(code if ok else max(code, 1))
+
+
+def begin_drain(listen_sock: socket.socket) -> None:
+    """Stop accepting new run requests and exit once active children finish."""
+    global _drain_requested
+
+    if _drain_requested:
+        return
+
+    _drain_requested = True
+    print("draining...", file=sys.stderr, flush=True)
+    listen_sock.close()
+
+
+def handle_drain_request(conn: socket.socket, listen_sock: socket.socket) -> None:
+    """Acknowledge a drain request and enter drain mode."""
+    begin_drain(listen_sock)
+    send_json_line(conn, build_response(ok=True, code=0, message="draining"))
+    conn.close()
+
+
+def reject_request(conn: socket.socket, message: str) -> None:
+    """Reject a request with an error response."""
+    send_json_line(conn, build_response(ok=False, code=1, message=message))
+    conn.close()
 
 
 def serve(host: str, port: int, allow_gui: bool = False) -> None:
@@ -321,32 +352,67 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
         gui_status = "enabled" if allow_gui else "disabled"
         print(f"fspython ready on {host}:{port} (gui {gui_status})", file=sys.stderr, flush=True)
 
+        listening = True
+
         while not _shutdown_requested:
+            if _drain_requested:
+                if not _active_children:
+                    break
+                time.sleep(0.1)
+                continue
+
             try:
                 conn, _addr = listen_sock.accept()
             except (TimeoutError, socket.timeout):
                 continue
             except OSError as exc:
-                if _shutdown_requested:
+                if _shutdown_requested or _drain_requested or not listening:
                     break
                 raise exc
 
+            try:
+                request = read_json_line(conn, max_size=MAX_REQUEST_BYTES)
+            except Exception as exc:
+                reject_request(conn, str(exc))
+                continue
+
+            command = request.get("command")
+            if command == "drain":
+                handle_drain_request(conn, listen_sock)
+                listening = False
+                continue
+
+            if _drain_requested:
+                reject_request(conn, "Server is draining and not accepting new runs")
+                continue
+
+            if command is not None:
+                reject_request(conn, f"Unknown command: {command!r}")
+                continue
+
+            try:
+                parse_request(request)
+            except Exception as exc:
+                reject_request(conn, str(exc))
+                continue
+
             pid = os.fork()
             if pid == 0:
-                listen_sock.close()
-                handle_client(conn)
+                if listening:
+                    listen_sock.close()
+                handle_client(conn, request)
             elif pid < 0:
-                send_json_line(
-                    conn,
-                    build_response(
-                        ok=False,
-                        code=1,
-                        message=f"fork failed: {os.strerror(errno.errno)}",
-                    ),
-                )
-                conn.close()
+                reject_request(conn, f"fork failed: {os.strerror(errno.errno)}")
             else:
+                _active_children.add(pid)
                 conn.close()
+                while True:
+                    reaped, _status = os.waitpid(pid, os.WNOHANG)
+                    if reaped == 0:
+                        break
+                    if reaped == pid:
+                        _active_children.discard(pid)
+                        break
 
         print("Shutting down...", file=sys.stderr, flush=True)
 
@@ -363,6 +429,26 @@ def write_captured_output(stdout: str, stderr: str) -> None:
         if not stderr.endswith("\n"):
             sys.stderr.write("\n")
         sys.stderr.flush()
+
+
+def drain_server(host: str, port: int) -> int:
+    """Ask a running server to drain and stop accepting new runs."""
+    request = {"command": "drain"}
+
+    with socket.create_connection((host, port), timeout=30) as conn:
+        send_json_line(conn, request)
+        response = read_json_line(conn)
+
+    message = response.get("message", "")
+    if message:
+        print(message, file=sys.stderr)
+
+    if not response.get("ok"):
+        if not message:
+            print(f"Unexpected response from server: {response!r}", file=sys.stderr)
+        return 1
+
+    return 0
 
 
 def run_script_via_server(
@@ -434,16 +520,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Arguments forwarded to the script (use -- before script args if needed)",
     )
 
+    drain_parser = subparsers.add_parser("drain", help="Stop accepting new runs on a running server")
+    drain_parser.add_argument("--host", default=env_host(), help=f"Server host (default: {DEFAULT_HOST})")
+    drain_parser.add_argument("--port", type=int, default=env_port(), help=f"Server port (default: {DEFAULT_PORT})")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Parse CLI arguments and dispatch to serve or run."""
+    """Parse CLI arguments and dispatch to serve, run, or drain."""
     args = build_parser().parse_args(argv)
 
     if args.command == "serve":
         serve(args.host, args.port, allow_gui=args.allow_gui)
         return 0
+
+    if args.command == "drain":
+        try:
+            return drain_server(args.host, args.port)
+        except ConnectionRefusedError:
+            print(
+                f"Could not connect to fspython at {args.host}:{args.port}. "
+                "Start the server with: uv run fspython.py serve",
+                file=sys.stderr,
+            )
+            return 1
 
     if args.command == "run":
         try:
