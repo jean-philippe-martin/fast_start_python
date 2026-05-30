@@ -209,6 +209,14 @@ Clear one function:
 cache.clear_function(fetch_users)
 ```
 
+Remove expired entries without clearing everything:
+
+```python
+cache.purge_expired()
+```
+
+When running under `fspython serve`, the server calls `purge_expired()` about every 30 minutes for each cache directory it has seen.
+
 From the shell, you can delete the cache directory:
 
 ```bash

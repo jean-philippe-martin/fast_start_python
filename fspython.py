@@ -26,6 +26,9 @@ _shutdown_requested = False
 _drain_requested = False
 _allow_gui = False
 _active_children: set[int] = set()
+_known_cache_dirs: set[Path] = set()
+_last_cache_purge = 0.0
+CACHE_PURGE_INTERVAL = 30 * 60
 
 
 def env_host() -> str:
@@ -374,6 +377,34 @@ def reject_request(conn: socket.socket, message: str) -> None:
     conn.close()
 
 
+def _record_cache_dir(cwd: Path, extra_env: dict[str, str]) -> None:
+    import cache
+
+    _known_cache_dirs.add(cache.cache_dir_for_run(cwd, extra_env))
+
+
+def _maybe_purge_expired_caches() -> None:
+    global _last_cache_purge
+
+    now = time.monotonic()
+    if now - _last_cache_purge < CACHE_PURGE_INTERVAL:
+        return
+
+    import cache
+
+    for cache_dir in list(_known_cache_dirs):
+        try:
+            removed = cache.purge_expired(cache_dir)
+        except OSError as exc:
+            print(f"Cache purge failed for {cache_dir}: {exc}", file=sys.stderr, flush=True)
+            continue
+        if removed:
+            label = "entry" if removed == 1 else "entries"
+            print(f"Purged {removed} expired cache {label} from {cache_dir}", file=sys.stderr, flush=True)
+
+    _last_cache_purge = now
+
+
 def serve(host: str, port: int, allow_gui: bool = False) -> None:
     """Preload imports, then listen for clients and fork to run each script."""
     global _allow_gui
@@ -388,6 +419,11 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
     install_sigchld_handler()
     install_shutdown_handlers()
 
+    import cache
+
+    _known_cache_dirs.add(cache.cache_dir_for_run(Path.cwd(), os.environ))
+    _maybe_purge_expired_caches()
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listen_sock:
         listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listen_sock.bind((host, port))
@@ -399,6 +435,8 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
         while not _shutdown_requested:
             if _drain_requested and not _active_children:
                 break
+
+            _maybe_purge_expired_caches()
 
             try:
                 conn, _addr = listen_sock.accept()
@@ -433,10 +471,12 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
                 continue
 
             try:
-                parse_request(request)
+                _script_path, cwd, _args, _gui, extra_env = parse_request(request)
             except Exception as exc:
                 reject_request(conn, str(exc))
                 continue
+
+            _record_cache_dir(cwd, extra_env)
 
             pid = os.fork()
             if pid == 0:

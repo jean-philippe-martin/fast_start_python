@@ -78,6 +78,38 @@ def clear_function(func: Callable[..., Any], cache_dir: Path | str | None = None
             target.unlink()
 
 
+def cache_dir_for_run(cwd: Path | str, env: dict[str, str] | None = None) -> Path:
+    """Return the cache root for a script run with the given cwd and environment."""
+    if env and env.get("FSPYTHON_CACHE_DIR"):
+        return Path(env["FSPYTHON_CACHE_DIR"]).expanduser().resolve()
+    return Path(cwd).resolve() / DEFAULT_CACHE_DIR.name
+
+
+def purge_expired(cache_dir: Path | str | None = None, ttl: timedelta = DEFAULT_TTL) -> int:
+    """Delete expired cache entry files. Returns the number of files removed."""
+    root = Path(cache_dir) if cache_dir is not None else default_cache_dir()
+    data_root = root / "data"
+    if not data_root.exists():
+        return 0
+
+    removed = 0
+    for entry_path in data_root.rglob("*.pkl"):
+        try:
+            with entry_path.open("rb") as handle:
+                payload = pickle.load(handle)
+        except (OSError, pickle.UnpicklingError):
+            continue
+        if _entry_expired(payload.get("created_at"), ttl):
+            entry_path.unlink(missing_ok=True)
+            removed += 1
+
+    for func_dir in data_root.iterdir():
+        if func_dir.is_dir() and not any(func_dir.iterdir()):
+            func_dir.rmdir()
+
+    return removed
+
+
 def memoize(
     func: F | None = None,
     *,

@@ -337,6 +337,49 @@ class CacheMemoizeTests(unittest.TestCase):
             mod.compute(1)
         self.assertEqual(mod.CALLS, 1)
 
+    def test_purge_expired_removes_old_entries(self) -> None:
+        module_path = self.cache_dir / "purge.py"
+        mod = _load_module(
+            """
+            import cache
+
+            @cache.memoize(cache_dir={cache_dir})
+            def compute(x):
+                return x * 2
+            """,
+            module_path,
+            self.cache_dir,
+        )
+
+        mod.compute(1)
+        mod.compute(2)
+        self.assertEqual(len(list(self.cache_dir.glob("data/**/*.pkl"))), 2)
+
+        expired_now = datetime.now(timezone.utc) + cache.DEFAULT_TTL + timedelta(seconds=1)
+        with patch("cache._utcnow", return_value=expired_now):
+            removed = cache.purge_expired(self.cache_dir)
+        self.assertEqual(removed, 2)
+        self.assertEqual(len(list(self.cache_dir.glob("data/**/*.pkl"))), 0)
+
+    def test_purge_expired_keeps_fresh_entries(self) -> None:
+        module_path = self.cache_dir / "purge_fresh.py"
+        mod = _load_module(
+            """
+            import cache
+
+            @cache.memoize(cache_dir={cache_dir})
+            def compute(x):
+                return x
+            """,
+            module_path,
+            self.cache_dir,
+        )
+
+        mod.compute(1)
+        removed = cache.purge_expired(self.cache_dir)
+        self.assertEqual(removed, 0)
+        self.assertEqual(len(list(self.cache_dir.glob("data/**/*.pkl"))), 1)
+
     def test_hit_when_import_outside_script_folder_changes(self) -> None:
         script_dir = self.cache_dir / "script_dir"
         outside_dir = self.cache_dir / "outside"

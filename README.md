@@ -131,6 +131,8 @@ uv run fspython.py drain
 
 While draining, `run` requests are rejected; `status` still works. When all active children complete, the server exits.
 
+The server also purges expired disk cache entries (older than 30 minutes) about every 30 minutes for cache directories used by recent runs.
+
 ## Helpers
 
 Start a fspython process in the background, with output redirected to `/tmp/fspython.log`:
