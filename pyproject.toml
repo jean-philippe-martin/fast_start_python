@@ -20,6 +20,9 @@ dependencies = [
     "statsmodels",
 ]
 
+[project.scripts]
+fspython = "fspython:cli"
+
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"

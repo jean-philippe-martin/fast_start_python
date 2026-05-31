@@ -437,7 +437,7 @@ def _maybe_purge_expired_caches() -> None:
 
 
 def serve(host: str, port: int, allow_gui: bool = False) -> None:
-    """Preload imports, then listen for clients and fork to run each script."""
+    """Listen for clients and fork to run each script after preloading imports."""
     global _allow_gui
 
     if not hasattr(os, "fork"):
@@ -445,6 +445,15 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
         raise SystemExit(1)
 
     _allow_gui = allow_gui
+
+    listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        listen_sock.bind((host, port))
+    except OSError:
+        listen_sock.close()
+        raise
+
     print("Preloading imports...", file=sys.stderr, flush=True)
     preload_imports()
     install_sigchld_handler()
@@ -455,9 +464,7 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
     _known_cache_dirs.add(cache.cache_dir_for_run(Path.cwd(), os.environ))
     _maybe_purge_expired_caches()
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listen_sock:
-        listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listen_sock.bind((host, port))
+    try:
         listen_sock.listen(128)
         listen_sock.settimeout(1.0)
         gui_status = "enabled" if allow_gui else "disabled"
@@ -527,6 +534,8 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
                         break
 
         print("Shutting down...", file=sys.stderr, flush=True)
+    finally:
+        listen_sock.close()
 
 
 def write_captured_output(stdout: str, stderr: str) -> None:
@@ -724,6 +733,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     return 1
+
+
+def cli() -> None:
+    """Console entry point for setuptools [project.scripts]."""
+    raise SystemExit(main())
 
 
 if __name__ == "__main__":
