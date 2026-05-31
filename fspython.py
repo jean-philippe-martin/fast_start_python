@@ -250,6 +250,27 @@ class CaptureFds:
         return self._stderr
 
 
+def _prepend_sys_path(path: str) -> None:
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+def prepare_script_environment(cwd: Path, extra_env: dict[str, str] | None = None) -> None:
+    """Configure cwd, optional env vars, and tools path for a script run."""
+    if extra_env:
+        os.environ.update(extra_env)
+
+    os.chdir(cwd)
+
+    paths_to_prepend: list[str] = [str(cwd.resolve())]
+    tools_lib = os.environ.get("FSPYTHON_LIB")
+    if tools_lib:
+        paths_to_prepend.append(str(Path(tools_lib).expanduser().resolve()))
+
+    for path in reversed(paths_to_prepend):
+        _prepend_sys_path(path)
+
+
 def run_script(
     script_path: Path,
     cwd: Path,
@@ -260,16 +281,10 @@ def run_script(
     if not script_path.is_file():
         raise FileNotFoundError(f"Script not found: {script_path}")
 
-    if extra_env:
-        os.environ.update(extra_env)
-
     code = 0
     with CaptureFds() as capture:
         sys.argv = [str(script_path), *args]
-        os.chdir(cwd)
-        cwd_str = str(cwd.resolve())
-        if cwd_str not in sys.path:
-            sys.path.insert(0, cwd_str)
+        prepare_script_environment(cwd, extra_env=extra_env)
         try:
             runpy.run_path(str(script_path), run_name="__main__")
         except SystemExit as exc:
@@ -278,14 +293,30 @@ def run_script(
     return capture.stdout, capture.stderr, code
 
 
-def run_script_gui(script_path: Path, cwd: Path, args: list[str]) -> tuple[str, str, int]:
+def run_script_gui(
+    script_path: Path,
+    cwd: Path,
+    args: list[str],
+    extra_env: dict[str, str] | None = None,
+) -> tuple[str, str, int]:
     """Run a script in a fresh Python process so matplotlib can open a GUI window."""
     if not script_path.is_file():
         raise FileNotFoundError(f"Script not found: {script_path}")
 
     attach_to_tty()
     env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
     env.pop("MPLBACKEND", None)
+
+    pythonpath_parts: list[str] = [str(cwd.resolve())]
+    tools_lib = env.get("FSPYTHON_LIB")
+    if tools_lib:
+        pythonpath_parts.append(str(Path(tools_lib).expanduser().resolve()))
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        pythonpath_parts.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
 
     completed = subprocess.run(
         [sys.executable, str(script_path), *args],
@@ -313,7 +344,7 @@ def handle_client(conn: socket.socket, request: dict[str, Any] | None = None) ->
                 "Restart with: uv run fspython.py serve --allow-gui"
             )
         if gui:
-            stdout, stderr, code = run_script_gui(script_path, cwd, args)
+            stdout, stderr, code = run_script_gui(script_path, cwd, args, extra_env=extra_env)
         else:
             stdout, stderr, code = run_script(script_path, cwd, args, extra_env=extra_env)
         ok = code == 0

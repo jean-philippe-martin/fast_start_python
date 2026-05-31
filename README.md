@@ -155,6 +155,30 @@ uv run fspython.py drain
 
 To allow plotting via the helpers, add `--allow-gui` to the `serve` command in `start-fspython.sh`.
 
+## Project packages (multi-user)
+
+Shared tools live once at the deployment root; each project has its own `.venv` for package versions:
+
+```
+root/
+  tools/              # fspython + cache — update once
+  project_foo/
+    .venv/            # this project's env (serve + all analysis shells)
+    analyses/...
+```
+
+Bootstrap a project:
+
+```
+cd root/project_foo
+uv venv && source .venv/bin/activate
+uv pip install -e ../tools/
+uv pip install geopandas
+fspython serve
+```
+
+Restart a project's server after tool or dependency updates. See `docs/multiuser_use_case.md` for the full layout.
+
 ## Tests
 
 Run the test suite:
