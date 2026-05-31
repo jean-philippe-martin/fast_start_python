@@ -118,7 +118,7 @@ def fspython_cmd(*args: str) -> list[str]:
     return [sys.executable, str(FSPYTHON_SCRIPT), *args]
 
 
-def send_server_command(host: str, port: int, request: dict, timeout: float = 30) -> dict:
+def send_server_command(host: str, port: int, request: dict, timeout: float = 120) -> dict:
     """Send a JSON control request to a running fspython server."""
     with socket.create_connection((host, port), timeout=timeout) as conn:
         conn.sendall(json.dumps(request, ensure_ascii=False).encode() + b"\n")
@@ -132,15 +132,17 @@ def send_server_command(host: str, port: int, request: dict, timeout: float = 30
         return json.loads(line.decode())
 
 
-def wait_for_server(host: str, port: int, timeout: float = 60.0) -> None:
+def wait_for_server(host: str, port: int, timeout: float = 120.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with socket.create_connection((host, port), timeout=1):
+            response = send_server_command(host, port, {"command": "status"}, timeout=5)
+            if response.get("ok") and response.get("state") == "ready":
                 return
         except OSError:
-            time.sleep(0.1)
-    raise TimeoutError(f"fspython did not start on {host}:{port} within {timeout}s")
+            pass
+        time.sleep(0.1)
+    raise TimeoutError(f"fspython did not become ready on {host}:{port} within {timeout}s")
 
 
 @dataclass

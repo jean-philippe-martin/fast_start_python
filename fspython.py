@@ -18,6 +18,7 @@ from typing import Any
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9876
+DEFAULT_CONNECT_TIMEOUT = 120.0
 MAX_REQUEST_BYTES = 1 * 1024 * 1024
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_CAPTURE_BYTES = 10 * 1024 * 1024
@@ -39,6 +40,17 @@ def env_host() -> str:
 def env_port() -> int:
     """Return the server port from FSPYTHON_PORT, or the default."""
     return int(os.environ.get("FSPYTHON_PORT", DEFAULT_PORT))
+
+
+def client_connect_timeout() -> float | None:
+    """Return client socket timeout while waiting for the server (seconds)."""
+    raw = os.environ.get("FSPYTHON_CONNECT_TIMEOUT")
+    if raw is None:
+        return DEFAULT_CONNECT_TIMEOUT
+    raw = raw.strip().lower()
+    if raw in {"", "none", "inf", "infinite"}:
+        return None
+    return float(raw)
 
 
 def preload_imports() -> None:
@@ -454,6 +466,9 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
         listen_sock.close()
         raise
 
+    listen_sock.listen(128)
+    listen_sock.settimeout(1.0)
+
     print("Preloading imports...", file=sys.stderr, flush=True)
     preload_imports()
     install_sigchld_handler()
@@ -465,8 +480,6 @@ def serve(host: str, port: int, allow_gui: bool = False) -> None:
     _maybe_purge_expired_caches()
 
     try:
-        listen_sock.listen(128)
-        listen_sock.settimeout(1.0)
         gui_status = "enabled" if allow_gui else "disabled"
         print(f"fspython ready on {host}:{port} (gui {gui_status})", file=sys.stderr, flush=True)
 
@@ -552,8 +565,15 @@ def write_captured_output(stdout: str, stderr: str) -> None:
         sys.stderr.flush()
 
 
-def send_command(host: str, port: int, request: dict[str, Any], timeout: float = 30) -> dict[str, Any]:
+def send_command(
+    host: str,
+    port: int,
+    request: dict[str, Any],
+    timeout: float | None = None,
+) -> dict[str, Any]:
     """Send a control request to the server and return the JSON response."""
+    if timeout is None:
+        timeout = client_connect_timeout()
     with socket.create_connection((host, port), timeout=timeout) as conn:
         send_json_line(conn, request)
         return read_json_line(conn)
@@ -624,7 +644,7 @@ def run_script_via_server(
         "env": env,
     }
 
-    with socket.create_connection((host, port), timeout=None if gui else 30) as conn:
+    with socket.create_connection((host, port), timeout=None) as conn:
         send_json_line(conn, request)
         response = read_json_line(conn)
 
