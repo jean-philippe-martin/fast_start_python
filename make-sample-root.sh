@@ -120,6 +120,7 @@ Other useful commands:
 
   fspython status          # check server state
   fspython drain           # stop accepting runs, exit when idle
+  fspython clearcache      # wipe disk cache in this analysis folder
 
 ----------------------------------------------------------------------
 Install packages (from any analysis folder or project root)

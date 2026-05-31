@@ -129,6 +129,12 @@ Gracefully stop accepting new runs and exit once in-flight scripts finish:
 uv run fspython.py drain
 ```
 
+Clear the disk cache for the current directory (respects `FSPYTHON_CACHE_DIR`):
+
+```
+fspython clearcache
+```
+
 While draining, `run` requests are rejected; `status` still works. When all active children complete, the server exits.
 
 The server also purges expired disk cache entries (older than 30 minutes) about every 30 minutes for cache directories used by recent runs.

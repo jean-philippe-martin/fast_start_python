@@ -1,4 +1,6 @@
+import os
 import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -9,6 +11,7 @@ from harness import (
     TESTS_DIR,
     SharedFspythonServerTest,
     ScriptSequenceHarness,
+    fspython_cmd,
     parse_calls_output,
 )
 
@@ -72,6 +75,29 @@ class CacheFspythonTests(SharedFspythonServerTest):
         harness.run_version(fixture_dir / "v2_script.py")
         result, calls = self._run_script(harness.script_path)
         self.assertEqual(result, 9)
+        self.assertEqual(calls, 1)
+
+    def test_clearcache_via_cli(self) -> None:
+        script_path = self.work_dir / "script.py"
+        shutil.copy(FIXTURES_DIR / "fspython_basic" / "script.py", script_path)
+
+        _result, calls = self._run_script(script_path)
+        self.assertEqual(calls, 1)
+
+        _result, calls = self._run_script(script_path)
+        self.assertEqual(calls, 0)
+
+        cleared = subprocess.run(
+            fspython_cmd("clearcache"),
+            cwd=self.work_dir,
+            env={**os.environ, "FSPYTHON_CACHE_DIR": str(self.cache_dir.resolve())},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(cleared.returncode, 0, cleared.stderr)
+        self.assertIn(str(self.cache_dir.resolve()), cleared.stderr)
+
+        _result, calls = self._run_script(script_path)
         self.assertEqual(calls, 1)
 
 

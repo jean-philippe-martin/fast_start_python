@@ -623,6 +623,27 @@ def client_env_for_run() -> dict[str, str]:
     }
 
 
+def cache_dir_for_client(cwd: Path | None = None) -> Path:
+    """Return the cache directory for the current client cwd and environment."""
+    import cache
+
+    return cache.cache_dir_for_run(cwd or Path.cwd(), client_env_for_run())
+
+
+def clearcache_command(cwd: Path | None = None) -> int:
+    """Remove all disk cache entries for the current analysis directory."""
+    import cache
+
+    root = cache_dir_for_client(cwd)
+    existed = root.exists()
+    cache.clear(root)
+    if existed:
+        print(f"Cleared cache at {root}", file=sys.stderr)
+    else:
+        print(f"No cache at {root}", file=sys.stderr)
+    return 0
+
+
 def run_script_via_server(
     script: str,
     host: str,
@@ -706,6 +727,11 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--host", default=env_host(), help=f"Server host (default: {DEFAULT_HOST})")
     status_parser.add_argument("--port", type=int, default=env_port(), help=f"Server port (default: {DEFAULT_PORT})")
 
+    subparsers.add_parser(
+        "clearcache",
+        help="Remove all disk cache entries for the current directory",
+    )
+
     return parser
 
 
@@ -718,12 +744,15 @@ def _connection_error(host: str, port: int) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Parse CLI arguments and dispatch to serve, run, drain, or status."""
+    """Parse CLI arguments and dispatch to serve, run, drain, status, or clearcache."""
     args = build_parser().parse_args(argv)
 
     if args.command == "serve":
         serve(args.host, args.port, allow_gui=args.allow_gui)
         return 0
+
+    if args.command == "clearcache":
+        return clearcache_command()
 
     if args.command == "drain":
         try:
