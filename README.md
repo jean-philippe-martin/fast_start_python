@@ -206,3 +206,6 @@ Compare cold-start Python vs fspython for a data-science script:
 ```
 uv run python bench_startup.py --runs 3
 ```
+
+On  my machine this reports: `Speedup: 5.57x`
+
